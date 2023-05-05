@@ -18,7 +18,14 @@ function inestabilidadDeRed() {
     };
 }
 
+ function setMaxAttempts(req, res, next){
+    var max = 5;
+    req.maxAttempts = max;
+    next();
+ }
+
 module.exports = {
     healthCheck,
     inestabilidadDeRed,
+    setMaxAttempts
 };

@@ -3,10 +3,31 @@ const { colectivoMasCercano } = require('../ubicacion');
 const { get } = require('../request');
 const { healthCheck } = require('../middleware.js');
 const { SERVICIOS } = require('../config');
-const { toPromise } = require('./promisify');
+const {setMaxAttempts} = require('../middleware.js');
 const TRANSITO = SERVICIOS.cuandoViene;
 
 const app = new express();
+
+function processGet(req, res) {
+    const parada = req.params.parada;
+    var ubicacionParada = 0;
+    console.log(req.maxAttempts);
+    req.maxAttempts--;
+    getToPromise(SERVICIOS.paradas, `/paradas/${parada}`)
+        .then(datosParada => {
+            ubicacionParada = datosParada.ubicacion;
+            return getLineasDataDeUnaParada(datosParada);
+        })
+        .then(lineasParada => getColectivosActivos(lineasParada))
+        .then(colectivos => getClosestBus(colectivos, ubicacionParada))
+        .then(colectivoMasCercano => {res.json(colectivoMasCercano)})
+        .catch(err => {
+            if(req.maxAttempts <= 0){
+            res.send(`Error due to: ${err}`)}
+            setTimeout(processGet(req, res), 1000)
+        });
+}
+
 
 function getToPromise(service, endpoint) {
     return new Promise((resolve, reject) => {
@@ -20,37 +41,51 @@ function getToPromise(service, endpoint) {
     })
 }
 
-function getLineasDeUnaParada(lineas) {
+function getLineasDataDeUnaParada(parada) {
 
-    let lineasPromise = lineas.map(
-        linea =>
-            getToPromise(SERVICIOS.lineas, `/lineas/${linea}`)
+    let lineasDeUnaParada = parada.lineas.map(
+        idLinea =>
+            getToPromise(SERVICIOS.lineas, `/lineas/${idLinea}`)
     )
-    console.log(lineasPromise);
-    return Promise.all(lineasPromise);
+    return Promise.all(lineasDeUnaParada)
+};
+
+
+function getColectivosActivos(lineasDeParada) {
+    return new Promise((resolve, reject) => {
+        if (!lineasDeParada) {
+            reject('No existen Lineas')
+        }
+
+        resolve(
+            lineasDeParada.filter(linea => linea.funciona)
+                .map(l => l.colectivos)
+                .flat())
+    }
+    );
+};
+
+function getClosestBus(colectivos, ubicacionParada) {
+    let closestBuses = colectivos
+        .filter(colectivo => (ubicacionParada - colectivo.ubicacion) >= 0)
+        .sort((a, b) => a < b);
+    closestBus = closestBuses[0];
+    return new Promise((resolve, reject) => {
+        if (!colectivos) {
+            reject('There are no Active Colectivos')
+        }
+        if (!closestBus) {
+            reject('There are no buses close yet')
+        }
+        resolve(closestBus)
+    })
 }
+
+app.use(setMaxAttempts);
 
 app.use(healthCheck);
 
-app.get('/cuando-viene/:parada', (req, res) => {
-    const parada = req.params.parada;
-    // Queremos obtener, para cada linea de la parada, el próximo colectivo que va a llegar
-    // Sin promise
-    //  get(SERVICIOS.paradas, `/paradas/${parada}`, (errorParada, dataParada) => toPromise(errorParada, dataParada)
-    getToPromise(SERVICIOS.paradas, `/paradas/${parada}`)
-        .then(datosParada => {
-            getLineasDeUnaParada(datosParada.lineas)
-                .then(lineas => {
-                  let colectivosProximos =    lineas.colectivos
-                        .filter(colectivo => (colectivo.ubicacion - datosParada.ubicacion) >= 0)
-                        //.sort( (a,b) => a < b )[0];       
-                  res.json(colectivosProximos);                 
-                })
-        })
-})
-//Hacer la diferencia ubic colectivo - ubic parada. Eso hacerle math.min y te da el tiempo de llegada
-//Eso hay que hacerlo para todos los colectivos para saber cual es el colectivo mas cercano de esa linea.
-//La rta tiene que ser un único colectivo.
+app.get('/cuando-viene/:parada',processGet)
 
 app.listen(TRANSITO.puerto, () => {
     console.log(`[${TRANSITO.nombre}] escuchando en el puerto ${TRANSITO.puerto}`);
